@@ -153,16 +153,21 @@ public class ExtensionLoader<T> {
         if (type == null) {
             throw new IllegalArgumentException("Extension type == null");
         }
+        // 必须是接口
         if (!type.isInterface()) {
             throw new IllegalArgumentException("Extension type (" + type + ") is not an interface!");
         }
+        // 必须加上@SPI修饰
         if (!withExtensionAnnotation(type)) {
             throw new IllegalArgumentException("Extension type (" + type +
                     ") is not an extension, because it is NOT annotated with @" + SPI.class.getSimpleName() + "!");
         }
 
+        // 每个type 对应的loader缓存起来
         ExtensionLoader<T> loader = (ExtensionLoader<T>) EXTENSION_LOADERS.get(type);
         if (loader == null) {
+
+            // new ExtensionLoader<T>(type) 会指定一个 ExtensionFactory。默认是AdaptiveExtensionFactory
             EXTENSION_LOADERS.putIfAbsent(type, new ExtensionLoader<T>(type));
             loader = (ExtensionLoader<T>) EXTENSION_LOADERS.get(type);
         }
@@ -421,6 +426,7 @@ public class ExtensionLoader<T> {
             synchronized (holder) {
                 instance = holder.get();
                 if (instance == null) {
+                    // 上面全是加了各种缓存对象。
                     instance = createExtension(name);
                     holder.set(instance);
                 }
@@ -566,6 +572,10 @@ public class ExtensionLoader<T> {
         }
     }
 
+    /**
+     * 创建适配接口的实例。
+     * @return
+     */
     @SuppressWarnings("unchecked")
     public T getAdaptiveExtension() {
         Object instance = cachedAdaptiveInstance.get();
@@ -580,6 +590,7 @@ public class ExtensionLoader<T> {
                 instance = cachedAdaptiveInstance.get();
                 if (instance == null) {
                     try {
+                        // 前面都是缓存逻辑
                         instance = createAdaptiveExtension();
                         cachedAdaptiveInstance.set(instance);
                     } catch (Throwable t) {
@@ -620,18 +631,27 @@ public class ExtensionLoader<T> {
 
     @SuppressWarnings("unchecked")
     private T createExtension(String name) {
+        // 扫描配置文件加载clazz
         Class<?> clazz = getExtensionClasses().get(name);
         if (clazz == null) {
             throw findException(name);
         }
         try {
+            // 创建并缓存 clazz的对象
             T instance = (T) EXTENSION_INSTANCES.get(clazz);
             if (instance == null) {
                 EXTENSION_INSTANCES.putIfAbsent(clazz, clazz.newInstance());
                 instance = (T) EXTENSION_INSTANCES.get(clazz);
             }
+            // 通过 seter方法进行依赖注入
             injectExtension(instance);
             Set<Class<?>> wrapperClasses = cachedWrapperClasses;
+
+            // 如果有wrapperClasses类则将 上面的原生对象通过wapperClass包装一下
+            /** 怎么判断是否是wrapperClass？
+             * {@link org.apache.dubbo.common.extension.ExtensionLoader#isWrapperClass}
+             * 即该类有没有一个有参构造。参数刚好就是该接口类型
+            */
             if (CollectionUtils.isNotEmpty(wrapperClasses)) {
                 for (Class<?> wrapperClass : wrapperClasses) {
                     instance = injectExtension((T) wrapperClass.getConstructor(type).newInstance(instance));
@@ -673,6 +693,7 @@ public class ExtensionLoader<T> {
 
                 try {
                     String property = getSetterProperty(method);
+                    // 这里又会去获取 参数类型和set 属性名对应的对象，如果有则注入。
                     Object object = objectFactory.getExtension(pt, property);
                     if (object != null) {
                         method.invoke(instance, object);
@@ -736,6 +757,7 @@ public class ExtensionLoader<T> {
             synchronized (cachedClasses) {
                 classes = cachedClasses.get();
                 if (classes == null) {
+                    // ==
                     classes = loadExtensionClasses();
                     cachedClasses.set(classes);
                 }
@@ -812,6 +834,7 @@ public class ExtensionLoader<T> {
             if (urls != null) {
                 while (urls.hasMoreElements()) {
                     java.net.URL resourceURL = urls.nextElement();
+                    // 这里开始加载clazz
                     loadResource(extensionClasses, classLoader, resourceURL, overridden, excludedPackages);
                 }
             }
@@ -841,6 +864,7 @@ public class ExtensionLoader<T> {
                                 line = line.substring(i + 1).trim();
                             }
                             if (line.length() > 0 && !isExcluded(line, excludedPackages)) {
+                                // 加载配置文件中的类
                                 loadClass(extensionClasses, resourceURL, Class.forName(line, true, classLoader), name, overridden);
                             }
                         } catch (Throwable t) {
@@ -874,6 +898,7 @@ public class ExtensionLoader<T> {
                     type + ", class line: " + clazz.getName() + "), class "
                     + clazz.getName() + " is not subtype of interface.");
         }
+        // 判断是否是@Adaptive标识。如果则代表这个类是"已适配" 类 通过extensionLoader.getAdaptiveExtension() 创建的就是这个类
         if (clazz.isAnnotationPresent(Adaptive.class)) {
             cacheAdaptiveClass(clazz, overridden);
         } else if (isWrapperClass(clazz)) {
@@ -995,6 +1020,8 @@ public class ExtensionLoader<T> {
     @SuppressWarnings("unchecked")
     private T createAdaptiveExtension() {
         try {
+            // getAdaptiveExtensionClass() 获取@Adaptive标识的类并创建出对象来
+            // 创建完 给其依赖注入一下。
             return injectExtension((T) getAdaptiveExtensionClass().newInstance());
         } catch (Exception e) {
             throw new IllegalStateException("Can't create adaptive extension " + type + ", cause: " + e.getMessage(), e);
@@ -1003,13 +1030,81 @@ public class ExtensionLoader<T> {
 
     private Class<?> getAdaptiveExtensionClass() {
         getExtensionClasses();
+        // 如果有 @Adaptive 注解标识的类则直接返回
         if (cachedAdaptiveClass != null) {
             return cachedAdaptiveClass;
         }
+        /**
+         *  如果没有 @Adaptive注解标识的类。则创建出来一个。这里很牛逼======
+         *  其实 就是生成一个类。这个类继承自接口。并且扩展@Adaptive 修饰的方法。
+         *  没有被@Adaptive 修饰的方法，则直接抛出异常
+         * package org.apache.dubbo.rpc;
+         * import org.apache.dubbo.common.URL;
+         * import org.apache.dubbo.common.extension.ExtensionLoader;
+         * import org.apache.dubbo.rpc.Exporter;
+         * import org.apache.dubbo.rpc.Invoker;
+         * import org.apache.dubbo.rpc.Protocol;
+         * import org.apache.dubbo.rpc.RpcException;
+         *
+         * public class Protocol$Adaptive
+         * implements Protocol {
+         *     public void destroy() {
+         *         throw new UnsupportedOperationException("The method public abstract void org.apache.dubbo.rpc
+         *         .Protocol.destroy() of interface org.apache.dubbo.rpc.Protocol is not adaptive method!");
+         *     }
+         *
+         *     public int getDefaultPort() {
+         *         throw new UnsupportedOperationException("The method public abstract int org.apache.dubbo.rpc
+         *         .Protocol.getDefaultPort() of interface org.apache.dubbo.rpc.Protocol is not adaptive method!");
+         *     }
+         *
+         *     public Exporter export(Invoker invoker) throws RpcException {
+         *         String string;
+         *         if (invoker == null) {
+         *             throw new IllegalArgumentException("org.apache.dubbo.rpc.Invoker argument == null");
+         *         }
+         *         if (invoker.getUrl() == null) {
+         *             throw new IllegalArgumentException("org.apache.dubbo.rpc.Invoker argument getUrl() == null");
+         *         }
+         *         URL uRL = invoker.getUrl();
+         *         String string2 = string = uRL.getProtocol() == null ? "dubbo" : uRL.getProtocol();
+         *         if (string == null) {
+         *             throw new IllegalStateException(new StringBuffer().append("Failed to get extension (org.apache
+         *             .dubbo.rpc.Protocol) name from url (").append(uRL.toString()).append(") use keys([protocol])")
+         *             .toString());
+         *         }
+         *         Protocol protocol = (Protocol)ExtensionLoader.getExtensionLoader(Protocol.class).getExtension
+         *         (string);
+         *         return protocol.export(invoker);
+         *     }
+         *
+         *     public Invoker refer(Class class_, URL uRL) throws RpcException {
+         *         String string;
+         *         if (uRL == null) {
+         *             throw new IllegalArgumentException("url == null");
+         *         }
+         *         URL uRL2 = uRL;
+         *         String string2 = string = uRL2.getProtocol() == null ? "dubbo" : uRL2.getProtocol();
+         *         if (string == null) {
+         *             throw new IllegalStateException(new StringBuffer().append("Failed to get extension (org.apache
+         *             .dubbo.rpc.Protocol) name from url (").append(uRL2.toString()).append(") use keys([protocol])
+         *             ").toString());
+         *         }
+         *         Protocol protocol = (Protocol)ExtensionLoader.getExtensionLoader(Protocol.class).getExtension
+         *         (string);
+         *         return protocol.refer(class_, uRL);
+         *     }
+         * }
+          */
         return cachedAdaptiveClass = createAdaptiveExtensionClass();
     }
 
+    /**
+     *
+     * @return
+     */
     private Class<?> createAdaptiveExtensionClass() {
+        //cachedDefaultName 是在 loadclass的时候。@SPI注解上标识 name
         String code = new AdaptiveClassCodeGenerator(type, cachedDefaultName).generate();
         ClassLoader classLoader = findClassLoader();
         org.apache.dubbo.common.compiler.Compiler compiler = ExtensionLoader.getExtensionLoader(org.apache.dubbo.common.compiler.Compiler.class).getAdaptiveExtension();

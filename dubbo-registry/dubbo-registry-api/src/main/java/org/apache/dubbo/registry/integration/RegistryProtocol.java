@@ -192,8 +192,9 @@ public class RegistryProtocol implements Protocol {
 
     @Override
     public <T> Exporter<T> export(final Invoker<T> originInvoker) throws RpcException {
-        URL registryUrl = getRegistryUrl(originInvoker);
-        // url to export locally
+        // 将之前register 协议转成url中的register参数对应的zookeeper协议
+        URL registryUrl = getRegistryUrl(originInvoker); // zookeeper://xxxxx
+        // url to export locally 将 需要写入注册中心的providerUrl 取出来。 dubbo:// xxx
         URL providerUrl = getProviderUrl(originInvoker);
 
         // Subscribe the override data
@@ -255,6 +256,7 @@ public class RegistryProtocol implements Protocol {
 
         return (ExporterChangeableWrapper<T>) bounds.computeIfAbsent(key, s -> {
             Invoker<?> invokerDelegate = new InvokerDelegate<>(originInvoker, providerUrl);
+            // 调用dubbo的exprot 保存到zk中
             return new ExporterChangeableWrapper<>((Exporter<T>) protocol.export(invokerDelegate), originInvoker);
         });
     }

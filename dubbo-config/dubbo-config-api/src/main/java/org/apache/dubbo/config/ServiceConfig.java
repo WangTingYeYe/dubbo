@@ -114,7 +114,9 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
      * A delayed exposure service timer
      */
     private static final ScheduledExecutorService DELAY_EXPORT_EXECUTOR = Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("DubboServiceDelayExporter", true));
-
+    //filter=org.apache.dubbo.rpc.protocol.ProtocolFilterWrapper
+    //listener=org.apache.dubbo.rpc.protocol.ProtocolListenerWrapper
+    //mock=org.apache.dubbo.rpc.support.MockProtocol
     private static final Protocol PROTOCOL = ExtensionLoader.getExtensionLoader(Protocol.class).getAdaptiveExtension();
 
     /**
@@ -189,7 +191,7 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
             bootstrap = DubboBootstrap.getInstance();
             bootstrap.init();
         }
-
+        // 检查配置 以及配置的融合，例如从配置中心加载配置、本地配置文件、系统变量等等
         checkAndUpdateSubConfigs();
 
         //init serviceMetadata
@@ -293,7 +295,7 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
             return;
         }
         exported = true;
-
+        //如果没有在配置文件指定服务名，则直接用接口名
         if (StringUtils.isEmpty(path)) {
             path = interfaceName;
         }
@@ -311,7 +313,11 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
                 this,
                 serviceMetadata
         );
-
+        // 获取注册中心的地址。并翻译成URL 协议为registry。此处为list。呼应注册中心可以配置多个
+        // eg:registry://127.0.0.1:2181/org.apache.dubbo.registry.RegistryService?application=dubbo-demo-api-provider&dubbo=2.0.2&pid=12864&registry=zookeeper&timestamp=1590073898647
+        // 其实这个url可理解为。我后面注册中心选的是registry=zookeeper，且application=dubbo-demo-api-provider
+        // 因为每个不同的中间件当注册中心，肯定会对应不同的实现类来完成。dubbo又不可能每次都new很多个对象来操作。他想利用一种aop的思路来完成
+        // 不同的注册中心注册。但具体使用哪个通过URL中的registry参数来确定。这样注册部分的代码就可以统一。其实这里就是DubboSPI机制。
         List<URL> registryURLs = ConfigValidationUtils.loadRegistries(this, true);
 
         for (ProtocolConfig protocolConfig : protocols) {
@@ -440,10 +446,12 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
         serviceMetadata.getAttachments().putAll(map);
 
         // export service
+        // 获取服务的协议即 name：dubbo 、host、port、其他的配置参数例如timeout等等构建一个dubbo协议url
+        ////eg: dubbo://192.168.199.125:20880/org.apache.dubbo.demo.DemoService?anyhost=true&application=dubbo-demo-api-provider&bind.ip=192.168.199.125&bind.port=20880&default=true&deprecated=false&dubbo=2.0.2&dynamic=true&generic=false&interface=org.apache.dubbo.demo.DemoService&methods=sayHello,sayHelloAsync&pid=12754&release=&side=provider&timestamp=1590073632592
         String host = findConfigedHosts(protocolConfig, registryURLs, map);
         Integer port = findConfigedPorts(protocolConfig, name, map);
         URL url = new URL(name, host, port, getContextPath(protocolConfig).map(p -> p + "/" + path).orElse(path), map);
-
+        // 可以扩展ConfiguratorFactory实现类 通过SPI机制来执行
         // You can customize Configurator to append extra parameters
         if (ExtensionLoader.getExtensionLoader(ConfiguratorFactory.class)
                 .hasExtension(url.getProtocol())) {
@@ -453,15 +461,19 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
 
         String scope = url.getParameter(SCOPE_KEY);
         // don't export when none is configured
+        //
         if (!SCOPE_NONE.equalsIgnoreCase(scope)) {
 
+            // 注册到本地。一般本地调试的时候会使用。就是injvm
             // export to local if the config is not remote (export to remote only when config is remote)
             if (!SCOPE_REMOTE.equalsIgnoreCase(scope)) {
                 exportLocal(url);
             }
+            // 注册到远程
             // export to remote if the config is not local (export to local only when config is local)
             if (!SCOPE_LOCAL.equalsIgnoreCase(scope)) {
                 if (CollectionUtils.isNotEmpty(registryURLs)) {
+                    // 便利多个配置中心。挨个向配置中心注册服务
                     for (URL registryURL : registryURLs) {
                         //if protocol is only injvm ,not register
                         if (LOCAL_PROTOCOL.equalsIgnoreCase(url.getProtocol())) {
@@ -486,9 +498,46 @@ public class ServiceConfig<T> extends ServiceConfigBase<T> {
                             registryURL = registryURL.addParameter(PROXY_KEY, proxy);
                         }
 
-                        Invoker<?> invoker = PROXY_FACTORY.getInvoker(ref, (Class) interfaceClass, registryURL.addParameterAndEncoded(EXPORT_KEY, url.toFullString()));
+                        /**
+                         * 此处比较重要，需要了解DubboSPI机制才能理解。
+                         * ProxyFactory.class 下有很多的类。但具体会调用到哪个类？
+                         * getInvoker() 方法上有 @Adaptive({PROXY_KEY}) 注解，可以看到他其实就是看传入的URL中的proxy参数来决定。
+                         * 如果没有则使用该类默认的@SPI("javassist") 标识的"javassist" 即 JavassistProxyFactory
+                         * 此时我们的registryURL的 proxy参数为null。则会调用到 JavassistProxyFactory类
+                         *
+                         * JavassistProxyFactory该类返回的 invoker就是封装了我们这次导出服务的方法。即以后只要执行这个invoker。就会
+                         * 执行到我们保罗的org.apache.dubbo.demo.provider.DemoServiceImpl#sayHello(java.lang.String)方法
+                         *
+                         * 豁然开朗☺
+                         */
+                        Invoker<?> invoker = PROXY_FACTORY.getInvoker(ref, (Class) interfaceClass,
+                            // 将dubbo://192.168.199.125:20880/xxxxxx。这个URL 编码后保存到 注册URL中的"export"参数
+                            registryURL.addParameterAndEncoded(EXPORT_KEY, url.toFullString()));
                         DelegateProviderMetaDataInvoker wrapperInvoker = new DelegateProviderMetaDataInvoker(invoker, this);
 
+                        /**
+                         * 同理这里 Protocol.class 类也有很多实现类那改用哪个?并且这里还没有传入URL
+                         *
+                         * 其实这里DubboSPI也可以调用你传入进来的对象的getUrl()方法获得。骚的一批。
+                         * 那么对应的就是 invoker.getUrl() 即 dubbo://192.168.199.125:20880/xxxxxx
+                         * 此处通过URL中的URL.getProtocol()即协议 默认使用dubbo协议。
+                         *
+                         * org.apache.dubbo.rpc.Protocol文件：
+                         *
+                         * filter=org.apache.dubbo.rpc.protocol.ProtocolFilterWrapper
+                         * listener=org.apache.dubbo.rpc.protocol.ProtocolListenerWrapper
+                         * mock=org.apache.dubbo.rpc.support.MockProtocol
+                         * 所以 最后返回的 protocol 对象是这样的：
+                         * ProtocolListenerWrapper->ProtocolFilterWrapper->RegistryProtocol->DubboProtocol 执行的调用连是这样的
+                         *
+                         * 1、由于前面两个是wrapper类没什么好说的
+                         * 2、由于此时url中 protocal="registry" 所以此时adaptive= RegistryProtocol
+                         * 3、当执行到RegistryProtocol 的export方法，是url的protcol已经变成dubbo了所以变成DubboProtocol
+                         *
+                         *
+                         * 最后 在wrapper类中将服务导出的url写入到zk中
+                         * @// TODO: 2020/5/22  调动链为什么是这样。并且具体真正导出做了那些事情
+                         */
                         Exporter<?> exporter = PROTOCOL.export(wrapperInvoker);
                         exporters.add(exporter);
                     }
