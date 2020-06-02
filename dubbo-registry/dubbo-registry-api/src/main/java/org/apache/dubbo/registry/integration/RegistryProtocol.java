@@ -177,8 +177,19 @@ public class RegistryProtocol implements Protocol {
         return overrideListeners;
     }
 
+    /**
+     * wrapper=org.apache.dubbo.registry.RegistryFactoryWrapper
+     * zookeeper=org.apache.dubbo.registry.zookeeper.ZookeeperRegistryFactory
+     *
+     * @param registryUrl
+     * @param registeredProviderUrl
+     */
     private void register(URL registryUrl, URL registeredProviderUrl) {
+        // zk
+        // RegistryFactoryWrapper -> ZookeeperRegistryFactory
         Registry registry = registryFactory.getRegistry(registryUrl);
+        // ZookeeperRegistryFactory.getRegistry(registryUrl)->ZookeeperRegistryFactory.createRegistry(registryUrl)->return  ZookeeperRegistry extends FailbackRegistry
+        // FailbackRegistry#register() -> ZookeeperRegistry.doRegister()-- zkclient 操作将url保存到zk中
         registry.register(registeredProviderUrl);
     }
 
@@ -213,7 +224,7 @@ public class RegistryProtocol implements Protocol {
         final Registry registry = getRegistry(originInvoker);
         final URL registeredProviderUrl = getUrlToRegistry(providerUrl, registryUrl);
 
-        // decide if we need to delay publish
+        // decide if we need to delay publish 延时发布
         boolean register = providerUrl.getParameter(REGISTER_KEY, true);
         if (register) {
             register(registryUrl, registeredProviderUrl);
@@ -254,9 +265,11 @@ public class RegistryProtocol implements Protocol {
     private <T> ExporterChangeableWrapper<T> doLocalExport(final Invoker<T> originInvoker, URL providerUrl) {
         String key = getCacheKey(originInvoker);
 
+        // 将注册的url->对应的invoker方法映射起来。缓存
         return (ExporterChangeableWrapper<T>) bounds.computeIfAbsent(key, s -> {
             Invoker<?> invokerDelegate = new InvokerDelegate<>(originInvoker, providerUrl);
             // 调用dubbo的exprot 保存到zk中
+            // 因为此时的 url 的 protocol=dubbo了
             return new ExporterChangeableWrapper<>((Exporter<T>) protocol.export(invokerDelegate), originInvoker);
         });
     }

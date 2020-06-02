@@ -149,6 +149,7 @@ public class ProtocolFilterWrapper implements Protocol {
     public <T> Exporter<T> export(Invoker<T> invoker) throws RpcException {
         // 对于注册协议直接交给下一个 protocol对象默认是dubbo
         if (UrlUtils.isRegistry(invoker.getUrl())) {
+            // 此时的url protocol="registry"
             return protocol.export(invoker);
         }
         return protocol.export(buildInvokerChain(invoker, SERVICE_FILTER_KEY, CommonConstants.PROVIDER));

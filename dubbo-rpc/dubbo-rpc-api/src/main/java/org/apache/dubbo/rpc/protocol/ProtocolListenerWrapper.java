@@ -58,6 +58,7 @@ public class ProtocolListenerWrapper implements Protocol {
     public <T> Exporter<T> export(Invoker<T> invoker) throws RpcException {
         // 注册协议这里直接交给下一个protocol对象
         if (UrlUtils.isRegistry(invoker.getUrl())) {
+            //此时的 url protocol="registry"
             return protocol.export(invoker);
         }
         return new ListenerExporterWrapper<T>(protocol.export(invoker),
